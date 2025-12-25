@@ -1,93 +1,107 @@
-# Piano Audio Transcription Tool
+# 🎹 Piano Transcription (Docker)
 
-This tool listens to a piano audio file and detects **which notes are played over time** (including chords).
-It outputs:
+This tool transcribes piano audio into:
+- **MIDI**
+- **TXT** (human-readable detected notes)
+- **JSON** (structured note events)
 
-- a **MIDI file**
-- a **TXT file** (human-readable detected notes)
-- a **JSON file** (machine-readable note events)
-
-It works with recorded audio files (`.wav`, `.ogg`, `.mp3`, `.m4a`, depending on your setup).
+Everything runs inside **Docker** — no local Python setup needed.
 
 ---
 
-## Requirements
+## 1️⃣ Requirements
+- **Docker Desktop** (Mac / Windows / Linux)
+  - https://www.docker.com/products/docker-desktop/
 
-- Python 3.10+ (Anaconda recommended)
+---
 
-Install dependencies once:
+## 2️⃣ Project Structure
+```
+.
+├── Dockerfile
+├── docker-compose.yml
+├── txt-format.py
+├── requirements.txt
+└── data/
+    └── test.ogg
+```
+
+- Put your **audio files** into the `data/` folder
+- All **outputs** will also appear in `data/`
+
+---
+
+## 3️⃣ Build the Docker image (first time only)
+From the project root:
 
 ```bash
-pip install torch piano-transcription-inference librosa soundfile
+docker compose build
 ```
+
+This will:
+- install system dependencies (ffmpeg, soundfile, etc.)
+- install Python packages
+- download the piano transcription model (once)
 
 ---
 
-## Basic Usage (most common)
+## 4️⃣ Run transcription
 
+### Basic usage
 ```bash
-python transcribe_piano.py --audio "/path/to/audio.ogg"
+docker compose run --rm piano --audio /data/test.ogg
 ```
 
-Outputs will be written **next to the audio file**.
-
----
-
-## Specify an Output Folder
-
+### Specify output folder
 ```bash
-python transcribe_piano.py \
-  --audio "/path/to/audio.ogg" \
-  --outdir "/path/to/output"
+docker compose run --rm piano \
+  --audio /data/test.ogg \
+  --outdir /data/output
+```
+
+### Optional flags
+```bash
+--no-midi        # do not keep MIDI file
+--full-json      # export full model output (advanced)
+--device cpu     # default (cuda possible if GPU is supported)
+```
+
+Example:
+```bash
+docker compose run --rm piano \
+  --audio /data/test.ogg \
+  --outdir /data/output \
+  --no-midi
 ```
 
 ---
 
-## Command Line Arguments
-
-| Argument | Description |
-|--------|------------|
-| `--audio` | **(required)** Path to the input audio file |
-| `--outdir` | Output directory (default: same folder as audio) |
-| `--stem` | Base name for output files (default: audio filename) |
-| `--device` | Inference device: `cpu` (default) or `cuda` |
-| `--no-midi` | Do not keep the generated MIDI file |
-| `--full-json` | Export a JSON-safe version of the full model output (advanced) |
-
----
-
-## Output Files
-
-For an input file `A2.ogg`, the tool produces:
-
-- `A2.mid` → MIDI transcription
-- `A2_notes.txt` → readable list of detected notes
-- `A2_result.json` → structured note events
-
-### TXT example
+## 5️⃣ Output files
+For `test.ogg`, you will get:
 
 ```
-idx  midi  name  onset(s)  offset(s)  dur(s)  velocity
-0    60    C4    0.644     1.004      0.359   76
-1    55    G3    0.645     1.010      0.365   71
+data/
+├── test.mid
+├── test_notes.txt
+└── test_result.json
 ```
 
 ---
 
-## What the Tool Does (Conceptually)
-
-1. Loads the audio file
-2. Runs a piano transcription model
-3. Detects:
-   - which notes are played
-   - when they start and end
-   - multiple notes at the same time (chords)
-4. Saves the results in easy-to-use formats
+## 6️⃣ Notes
+- First run may take longer (model download ~165MB)
+- Best results with clean piano recordings
+- Acoustic piano via microphone is supported
 
 ---
 
-## Notes
+## 7️⃣ Troubleshooting
+If something goes wrong:
+```bash
+docker compose build --no-cache
+```
 
-- This tool **does not grade performance** — it only detects played notes.
-- Best results are achieved with **clean piano recordings**.
-- Acoustic piano via microphone is supported, but recording quality matters.
+---
+
+## ✔️ That’s it
+No Python install, no virtualenv, no system dependencies — just Docker.

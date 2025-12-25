@@ -1,19 +1,19 @@
 FROM python:3.10-slim
 
-# System dependencies for audio decoding + soundfile
+WORKDIR /app
+
+# System dependencies for audio decoding + downloading the model
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
- && rm -rf /var/lib/apt/lists/*
+    wget \
+  && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-
-# Install python deps
-COPY requirements.txt .
+# Python deps
+COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy your script into the image
+# Your script
 COPY txt-format.py /app/txt-format.py
 
-# Run the script by default
 ENTRYPOINT ["python", "/app/txt-format.py"]

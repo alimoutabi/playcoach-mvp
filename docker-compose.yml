@@ -1,20 +1,10 @@
 services:
   piano:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: piano_transcriber
-
-    # Mount your Mac audio folder into the container
-    # Change this if your audio is somewhere else
+    build: .
     volumes:
-      - /Users/alimoutabi/Desktop/notes:/data
-
-    # Default working directory in container
-    working_dir: /app
-
-    # This is the important part: it runs your script
+      - ./data:/data
+      - model_cache:/root/piano_transcription_inference_data
     entrypoint: ["python", "/app/txt-format.py"]
 
-    # Default arguments (you can override when you run)
-    command: ["--help"]
+volumes:
+  model_cache:
