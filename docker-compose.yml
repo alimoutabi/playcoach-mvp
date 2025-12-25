@@ -1,0 +1,20 @@
+services:
+  piano:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: piano_transcriber
+
+    # Mount your Mac audio folder into the container
+    # Change this if your audio is somewhere else
+    volumes:
+      - /Users/alimoutabi/Desktop/notes:/data
+
+    # Default working directory in container
+    working_dir: /app
+
+    # This is the important part: it runs your script
+    entrypoint: ["python", "/app/txt-format.py"]
+
+    # Default arguments (you can override when you run)
+    command: ["--help"]
