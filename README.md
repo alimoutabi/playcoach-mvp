@@ -1,215 +1,62 @@
-# Piano Transcription (txt-format.py)
+# frame-based.py — Piano Transcription + Filters + Frame-Based Chords
 
-This repo contains **txt-format.py**: a small CLI tool that
-- loads an audio file
-- runs `piano_transcription_inference`
-- clamps predicted note times to the real audio duration (important!)
-- optionally applies post-filters **A / B / D**
-- writes outputs: **TXT + JSON + MIDI** (unless `--no-midi`)
+This script transcribes piano audio using `piano_transcription_inference`, writes MIDI/TXT/JSON, and can also generate **frame-based chord segments** (useful for “which notes were played” / near-real-time logic).
 
----
+## What it does
+- Loads audio (`librosa`)
+- Transcribes notes + pedal (`piano_transcription_inference`)
+- **Clamps** predicted note times to real audio duration (fixes impossible offsets)
+- Optional post-filters: **A / B / D**
+- Optional: **Frame-based chord extraction** + merging into chord segments
 
-## 1) Requirements
+## Filters
+### A — Adaptive consistency
+Removes one-off “ghost” notes across the whole audio.
+- Keeps notes that repeat (>= `--min-occurrences`) OR have enough total duration (>= `--min-total-dur-ratio-of-max`).
 
-### Python
-- Python **3.10+** (3.12 works if your environment supports torch + dependencies)
+### B — Onset clustering (chord cleanup)
+Groups notes that start almost together (a chord moment) using `--cluster-window`.
+Inside each cluster it:
+- Dedupe same MIDI within a short window (`--dedupe-window`)
+- Dedupe octave duplicates (same pitch class like E4 + E6 → keep one “E”)
+- Keep only top-K strongest notes (`--max-notes-per-cluster`)
+Then globally:
+- Dedupe same MIDI across nearby clusters (`--dedupe-window`)
 
-### Install libraries (pip)
-Recommended: use a virtualenv / conda env.
+### D — Harmonic/overtone filter
+Drops likely harmonics (octaves, octave+fifth, etc.) when a lower “base” note is clearly stronger.
+- Controlled by `--harmonic-velocity-ratio`
 
+## Frame-based chord mode (real-time style)
+Enable with `--write-chords`.
+
+How it works:
+1. Split time into frames of length `--frame-hop` (e.g. 0.05s = 50ms).
+2. For each frame, collect “active” notes (note overlaps the frame).
+3. Drop weak notes (`--frame-min-vel`) and frames with too few notes (`--frame-min-active`).
+4. Merge consecutive frames into stable chord segments if they’re similar enough:
+   - Similarity is Jaccard overlap ≥ `--merge-min-jaccard`
+   - Drop very short segments < `--merge-min-dur`
+
+Outputs:
+- `*_chords.txt` (chord segments)
+- JSON also includes `chord_segments` (and optionally `frame_chords` if enabled)
+
+## Output files
+- `*_notes.txt`  → filtered note events table
+- `*_result.json` → note events + settings (+ chord segments if enabled)
+- `*.mid` → MIDI output (unless `--no-midi`)
+- `*_chords.txt` → frame-based chord segments (only with `--write-chords`)
+
+## Run (your exact command)
 ```bash
-pip install --upgrade pip
-pip install librosa piano-transcription-inference torch numpy soundfile audioread
-```
-
-Notes:
-- If you use **.m4a** input, you may need system codecs / ffmpeg.  
-  On macOS (Homebrew):
-  ```bash
-  brew install ffmpeg
-  ```
-
----
-
-## 2) What the script produces (outputs)
-
-If your input is `test.ogg` and you set:
-
-- `--outdir "/Users/ali/output"`
-
-Outputs will be:
-- `/Users/ali/output/test.mid`
-- `/Users/ali/output/test_notes.txt`
-- `/Users/ali/output/test_result.json`
-
----
-
-## 3) Basic run (no filters)
-
-Use this first to verify everything works.
-
-```bash
-python txt-format.py \
-  --audio "/path/to/test.ogg" \
-  --outdir "/path/to/output"
-```
-
----
-
-## 4) Debug run (print audio info + raw notes)
-
-Very useful when results look wrong.
-
-```bash
-python txt-format.py \
-  --audio "/path/to/test.ogg" \
-  --outdir "/path/to/output" \
-  --print-audio-info \
-  --print-raw
-```
-
-What you should check:
-- Audio duration printed matches your real file length
-- RAW notes look reasonable (then filters can clean them)
-
----
-
-## 5) Filters overview (A / B / D)
-
-The model sometimes outputs **extra notes** (ghost notes, harmonics, duplicates).
-Filters help reduce this.
-
-### B = Onset clustering (core clean-up)
-Groups notes by onset time (chord moment), dedupes same pitch, keeps top-K notes.
-
-Enable with:
-- `--enable-B`
-
-Key parameters:
-- `--cluster-window` (seconds)  
-  Typical: `0.03` to `0.06`
-- `--dedupe-window` (seconds)  
-  Typical: `0.05` to `0.10`
-- `--max-notes-per-cluster`  
-  Typical: `3` for triads, `4-6` for richer chords
-
-### D = Harmonic / overtone removal
-Drops likely harmonics (e.g. octave/fifth above) if base note is clearly stronger.
-
-Enable with:
-- `--enable-D`
-
-Key parameter:
-- `--harmonic-velocity-ratio`  
-  Typical: `1.10` to `1.30`
-
-### A = Adaptive consistency filter (global)
-Removes one-off notes across the whole clip (notes that appear only once or have tiny total duration).
-
-Enable with:
-- `--enable-A`
-
-Key parameters:
-- `--min-occurrences`  
-  Typical: `2`
-- `--min-total-dur-ratio-of-max`  
-  Typical: `0.05` to `0.15`
-
----
-
-## 6) “How to run” examples (B only / B+D / A+B+D)
-
-### 6.1 Run with **B only**
-Good first step to reduce duplicates and keep the strongest chord notes.
-
-```bash
-python txt-format.py \
-  --audio "/path/to/test.ogg" \
-  --outdir "/path/to/output" \
-  --enable-B \
-  --cluster-window 0.04 \
-  --dedupe-window 0.08 \
-  --max-notes-per-cluster 6
-```
-
-### 6.2 Run with **B + D**
-Recommended for most “which notes were played” scenarios.
-
-```bash
-python txt-format.py \
-  --audio "/path/to/test.ogg" \
-  --outdir "/path/to/output" \
-  --enable-B --enable-D \
-  --cluster-window 0.04 \
-  --dedupe-window 0.08 \
-  --max-notes-per-cluster 6 \
-  --harmonic-velocity-ratio 1.15
-```
-
-### 6.3 Run with **A + B + D** (strong filtering)
-If you still see many ghost notes, enable A too.
-
-```bash
-python txt-format.py \
-  --audio "/path/to/test.ogg" \
-  --outdir "/path/to/output" \
+python frame-based.py \
+  --audio "/Users/alimoutabi/PycharmProjects/PythonProject6/data/test2.ogg" \
+  --outdir "/Users/alimoutabi/Desktop/notes/output" \
   --enable-A --enable-B --enable-D \
-  --cluster-window 0.04 \
-  --dedupe-window 0.08 \
-  --max-notes-per-cluster 6 \
-  --harmonic-velocity-ratio 1.15 \
-  --min-occurrences 2 \
-  --min-total-dur-ratio-of-max 0.10
-```
-
----
-
-## 7) Optional flags
-
-### Don’t keep MIDI
-```bash
-python txt-format.py --audio "/path/to/test.ogg" --outdir "/path/to/output" --no-midi
-```
-
-### Use CUDA (only if available)
-```bash
-python txt-format.py --audio "/path/to/test.ogg" --outdir "/path/to/output" --device cuda
-```
-
----
-
-## 8) Troubleshooting
-
-### “Offsets longer than audio” (e.g., 6s in a 1s clip)
-Fixed by the script via **clamping**:
-- It clamps event offsets to the true audio duration.
-- It drops notes whose onset is beyond audio duration.
-
-### Missing C/E/G but seeing weird high notes (e.g., G6/E6)
-Try:
-1) Run with `--print-raw` to confirm the model outputs them
-2) Enable `--enable-D` and increase harmonic filtering a bit:
-   - try `--harmonic-velocity-ratio 1.25`
-3) Reduce max notes per chord:
-   - try `--max-notes-per-cluster 3` for a triad
-
-### m4a loading issues
-Install ffmpeg:
-```bash
-brew install ffmpeg
-```
-
----
-
-## 9) Quick “best default” command
-
-```bash
-python txt-format.py \
-  --audio "/path/to/test.ogg" \
-  --outdir "/path/to/output" \
-  --enable-B --enable-D \
-  --cluster-window 0.04 \
-  --dedupe-window 0.08 \
-  --max-notes-per-cluster 4 \
-  --harmonic-velocity-ratio 1.15
-```
+  --write-chords \
+  --frame-hop 0.05 \
+  --frame-min-vel 20 \
+  --frame-min-active 2 \
+  --merge-min-jaccard 0.85 \
+  --merge-min-dur 0.10
