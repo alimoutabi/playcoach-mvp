@@ -1,169 +1,62 @@
-# 🎹 Piano Audio Transcription (Python Only)
+# frame-based.py — Piano Transcription + Filters + Frame-Based Chords
 
-This tool transcribes **piano audio recordings** into:
-- **MIDI** (`.mid`)
-- **TXT** (human-readable detected notes)
-- **JSON** (machine-readable note events)
+This script transcribes piano audio using `piano_transcription_inference`, writes MIDI/TXT/JSON, and can also generate **frame-based chord segments** (useful for “which notes were played” / near-real-time logic).
 
-It uses a pretrained piano transcription model and runs **locally with Python** (no Docker required).
+## What it does
+- Loads audio (`librosa`)
+- Transcribes notes + pedal (`piano_transcription_inference`)
+- **Clamps** predicted note times to real audio duration (fixes impossible offsets)
+- Optional post-filters: **A / B / D**
+- Optional: **Frame-based chord extraction** + merging into chord segments
 
----
+## Filters
+### A — Adaptive consistency
+Removes one-off “ghost” notes across the whole audio.
+- Keeps notes that repeat (>= `--min-occurrences`) OR have enough total duration (>= `--min-total-dur-ratio-of-max`).
 
-## 1️⃣ Requirements
+### B — Onset clustering (chord cleanup)
+Groups notes that start almost together (a chord moment) using `--cluster-window`.
+Inside each cluster it:
+- Dedupe same MIDI within a short window (`--dedupe-window`)
+- Dedupe octave duplicates (same pitch class like E4 + E6 → keep one “E”)
+- Keep only top-K strongest notes (`--max-notes-per-cluster`)
+Then globally:
+- Dedupe same MIDI across nearby clusters (`--dedupe-window`)
 
-- **macOS / Linux / Windows**
-- **Python 3.10 or newer**
-- Internet connection (first run downloads the model ~165 MB)
+### D — Harmonic/overtone filter
+Drops likely harmonics (octaves, octave+fifth, etc.) when a lower “base” note is clearly stronger.
+- Controlled by `--harmonic-velocity-ratio`
 
-Check Python version:
+## Frame-based chord mode (real-time style)
+Enable with `--write-chords`.
+
+How it works:
+1. Split time into frames of length `--frame-hop` (e.g. 0.05s = 50ms).
+2. For each frame, collect “active” notes (note overlaps the frame).
+3. Drop weak notes (`--frame-min-vel`) and frames with too few notes (`--frame-min-active`).
+4. Merge consecutive frames into stable chord segments if they’re similar enough:
+   - Similarity is Jaccard overlap ≥ `--merge-min-jaccard`
+   - Drop very short segments < `--merge-min-dur`
+
+Outputs:
+- `*_chords.txt` (chord segments)
+- JSON also includes `chord_segments` (and optionally `frame_chords` if enabled)
+
+## Output files
+- `*_notes.txt`  → filtered note events table
+- `*_result.json` → note events + settings (+ chord segments if enabled)
+- `*.mid` → MIDI output (unless `--no-midi`)
+- `*_chords.txt` → frame-based chord segments (only with `--write-chords`)
+
+## Run (your exact command)
 ```bash
-python3 --version
-```
-
----
-
-## 2️⃣ (Recommended) Create a virtual environment
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
----
-
-## 3️⃣ System dependency (important for audio decoding)
-
-### macOS
-Install `ffmpeg` (required for `.m4a`, `.mp3`, `.ogg`):
-
-```bash
-brew install ffmpeg
-```
-
-### Linux (Ubuntu/Debian)
-```bash
-sudo apt update
-sudo apt install ffmpeg
-```
-
----
-
-## 4️⃣ Install Python libraries
-
-Upgrade pip and install all required libraries:
-
-```bash
-pip install --upgrade pip
-pip install torch piano-transcription-inference librosa soundfile audioread numpy
-```
-
-### What these libraries do (short)
-| Library | Purpose |
-|------|-------|
-| torch | Neural network runtime |
-| piano-transcription-inference | Piano transcription model |
-| librosa | Audio loading & resampling |
-| soundfile | Audio decoding |
-| audioread | Fallback decoder |
-| numpy | Numeric arrays |
-
----
-
-## 5️⃣ First run (model download)
-
-On the **first run**, the model file (~165 MB) is downloaded automatically.
-This happens only once and is reused afterwards.
-
----
-
-## 6️⃣ Run the script
-
-### Basic usage
-Outputs are written **next to the audio file**.
-
-```bash
-python txt-format.py --audio "/path/to/audio.m4a"
-```
-
----
-
-### Specify output folder
-
-```bash
-python txt-format.py \
-  --audio "/Users/alimoutabi/Desktop/notes/A.m4a" \
-  --outdir "/Users/alimoutabi/Desktop/notes/output"
-```
-
----
-
-### Optional arguments
-
-```bash
---device cpu        # default (use cuda only if supported)
---stem my_take      # custom output filename
---no-midi           # do not keep MIDI file
---full-json         # export full model output (advanced)
-```
-
-Example:
-```bash
-python txt-format.py \
-  --audio "/Users/alimoutabi/Desktop/notes/A.m4a" \
+python frame-based.py \
+  --audio "/Users/alimoutabi/PycharmProjects/PythonProject6/data/test2.ogg" \
   --outdir "/Users/alimoutabi/Desktop/notes/output" \
-  --stem practice_01 \
-  --no-midi
-```
-
----
-
-## 7️⃣ Output files
-
-For input `A.m4a`, you get:
-
-```
-A.mid
-A_notes.txt
-A_result.json
-```
-
-TXT columns:
-- idx: note index
-- midi: MIDI note number
-- name: note name (e.g. C4)
-- onset / offset: seconds
-- dur: duration
-- velocity: estimated velocity
-
----
-
-## 8️⃣ Troubleshooting
-
-- **"PySoundFile failed" warning**  
-  Normal — `audioread + ffmpeg` is used instead.
-
-- **CUDA not available**  
-  Use:
-  ```bash
-  --device cpu
-  ```
-
-- **Model download fails**  
-  Check internet and write permissions in your home folder.
-
----
-
-## ✔️ Summary (TL;DR)
-
-```bash
-brew install ffmpeg
-python3 -m venv .venv
-source .venv/bin/activate
-pip install torch piano-transcription-inference librosa soundfile audioread numpy
-python txt-format.py --audio "/path/to/file.m4a" --outdir "/path/to/output"
-```
-
----
-
-Enjoy 🎹  
-This tool is designed for **practice analysis**, not grading.
+  --enable-A --enable-B --enable-D \
+  --write-chords \
+  --frame-hop 0.05 \
+  --frame-min-vel 20 \
+  --frame-min-active 2 \
+  --merge-min-jaccard 0.85 \
+  --merge-min-dur 0.10

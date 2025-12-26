@@ -26,12 +26,19 @@ NEW (recommended for your "which notes were played" app):
 - Global dedupe across clusters:
     If the same MIDI is predicted multiple times within a short time window,
     keep only the strongest one.
+
+NEW (FRAME-BASED / real-time-ready):
+- Compute active notes per short frame (e.g. every 50ms)
+- Merge consecutive similar frames into chord segments
+- Save *_chords.txt and chord_segments in JSON
 """
 
 import argparse
 import json
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
+from typing import List, Tuple, Set
 
 import librosa
 from piano_transcription_inference import PianoTranscription, sample_rate
@@ -220,13 +227,6 @@ def cluster_by_onset(note_events: list[dict], cluster_window: float) -> list[lis
 def dedupe_same_pitch_in_cluster(cluster: list[dict], dedupe_window: float) -> list[dict]:
     """
     Remove duplicates of the same MIDI pitch within a cluster.
-
-    Why:
-      Models sometimes output the same pitch multiple times very close together.
-      We keep the "best" one (highest velocity, then longest duration).
-
-    dedupe_window:
-      If two notes of same midi start within dedupe_window seconds, treat as duplicates.
     """
     cluster_sorted = sort_by_onset(cluster)
 
@@ -258,18 +258,7 @@ def dedupe_same_pitch_in_cluster(cluster: list[dict], dedupe_window: float) -> l
 
 def dedupe_pitch_class_in_cluster(cluster: list[dict]) -> list[dict]:
     """
-    NEW: Remove octave-duplicates inside ONE chord cluster.
-
-    Problem:
-      The model often outputs the same note-name in different octaves at the same time
-      (e.g., E4 and E6 in one chord moment). For an app that checks "which notes were played",
-      we usually want only ONE representative of "E" at that moment.
-
-    Strategy:
-      - Compute the median MIDI of the cluster (represents the 'center' pitch region)
-      - Group notes by pitch class (midi % 12)
-      - For each pitch class, keep the note closest to the median MIDI
-        (ties -> higher velocity -> longer duration)
+    Remove octave-duplicates inside ONE chord cluster (same pitch class).
     """
     if not cluster:
         return cluster
@@ -283,9 +272,9 @@ def dedupe_pitch_class_in_cluster(cluster: list[dict]) -> list[dict]:
 
     def rank(ev: dict):
         midi = int(ev["midi_note"])
-        dist = abs(midi - median_midi)   # smaller is better
-        vel = note_velocity(ev)          # bigger is better
-        dur = note_duration(ev)          # bigger is better
+        dist = abs(midi - median_midi)
+        vel = note_velocity(ev)
+        dur = note_duration(ev)
         return (dist, -vel, -dur)
 
     kept = []
@@ -299,12 +288,6 @@ def dedupe_pitch_class_in_cluster(cluster: list[dict]) -> list[dict]:
 def keep_top_k_in_cluster(cluster: list[dict], max_notes: int) -> list[dict]:
     """
     Keep only the top-K strongest notes in a cluster.
-
-    Strength heuristic:
-      Primary: velocity (descending)
-      Secondary: duration (descending)
-
-    Effective for chords: keep strongest notes, drop weak ghosts.
     """
     ranked = sorted(
         cluster,
@@ -316,14 +299,7 @@ def keep_top_k_in_cluster(cluster: list[dict], max_notes: int) -> list[dict]:
 
 def dedupe_same_midi_globally(note_events: list[dict], dedupe_window: float) -> list[dict]:
     """
-    NEW: Remove near-duplicate repeats of the same MIDI across the whole audio.
-
-    Example:
-      The model outputs C2 twice within 80ms -> keep only the stronger one.
-
-    Rule:
-      If same MIDI appears again within dedupe_window seconds, treat as duplicate.
-      Keep the stronger one (velocity, then duration).
+    Remove near-duplicate repeats of the same MIDI across the whole audio.
     """
     events = sort_by_onset(note_events)
 
@@ -365,19 +341,10 @@ def drop_likely_harmonics(
 ) -> list[dict]:
     """
     Drop notes that look like harmonics / overtones within a chord cluster.
-
-    Idea:
-      If a high note is approximately a harmonic interval above a lower note
-      (e.g. +12 semitones = octave, +19 = octave+fifth, +24 = two octaves),
-      and the lower note is stronger (velocity higher by ratio),
-      then the high note might be a model hallucinated overtone.
-
-    Applied inside a single onset cluster (chord moment).
     """
     if not cluster:
         return cluster
 
-    # If there are duplicates of same midi, keep the strongest one for harmonic checks
     best_by_midi: dict[int, dict] = {}
     for ev in cluster:
         midi = int(ev["midi_note"])
@@ -419,19 +386,6 @@ def adaptive_consistency_filter(
 ) -> list[dict]:
     """
     Adaptive consistency filter across the whole audio.
-
-    Goal:
-      Remove "one-off" ghost notes that appear only once or have tiny total duration.
-
-    How it works:
-      - Count occurrences per MIDI note
-      - Sum total duration per MIDI note
-      - Keep notes that:
-          (occurrences >= min_occurrences) OR
-          (total_duration >= min_total_dur_ratio_of_max * max_total_duration)
-
-      Optional override:
-        keep_if_velocity_ge: if a note has velocity >= this threshold, keep it even if rare.
     """
     if not note_events:
         return note_events
@@ -464,7 +418,6 @@ def adaptive_consistency_filter(
             filtered.append(ev)
             continue
 
-        # else: drop it
     return sort_by_onset(filtered)
 
 
@@ -474,52 +427,35 @@ def adaptive_consistency_filter(
 def filter_note_events_ABD(
     note_events: list[dict],
     *,
-    # (B) clustering params
     enable_B: bool = False,
     cluster_window: float = 0.04,
     dedupe_window: float = 0.08,
     max_notes_per_cluster: int = 6,
-    # (D) harmonic params
     enable_D: bool = False,
     harmonic_velocity_ratio: float = 1.15,
-    # (A) consistency params
     enable_A: bool = False,
     min_occurrences: int = 2,
     min_total_dur_ratio_of_max: float = 0.10,
 ) -> list[dict]:
     """
-    Run the requested filters in a sensible order:
-
-    1) (B) Cluster by onset, dedupe same pitch, dedupe pitch-class (octaves), keep top-K per chord moment,
-       then global-dedupe same MIDI across clusters.
-    2) (D) Drop likely harmonics inside each chord cluster
-    3) (A) Adaptive consistency filter globally (remove one-off ghosts)
-
-    You can enable/disable A/B/D independently.
+    1) B (optional): cluster + dedupe + pitch-class dedupe + top-K + global dedupe
+    2) D (optional): harmonic drop
+    3) A (optional): consistency filter
     """
     events = sort_by_onset(note_events)
 
-    # ---- (B) clustering filter ----
     if enable_B:
         clusters = cluster_by_onset(events, cluster_window=cluster_window)
         pruned: list[dict] = []
 
         for c in clusters:
-            # 1) Deduplicate exact same MIDI inside the cluster
             c = dedupe_same_pitch_in_cluster(c, dedupe_window=dedupe_window)
-
-            # 2) NEW: Remove octave duplicates (same pitch class) inside the cluster
             c = dedupe_pitch_class_in_cluster(c)
-
-            # 3) Keep top-K strongest
             c = keep_top_k_in_cluster(c, max_notes=max_notes_per_cluster)
-
             pruned.extend(c)
 
-        # 4) NEW: Dedupe same MIDI across nearby clusters globally
         events = dedupe_same_midi_globally(pruned, dedupe_window=dedupe_window)
 
-    # ---- (D) harmonic filter ----
     if enable_D:
         clusters = cluster_by_onset(events, cluster_window=cluster_window)
         pruned: list[dict] = []
@@ -528,7 +464,6 @@ def filter_note_events_ABD(
             pruned.extend(c)
         events = sort_by_onset(pruned)
 
-    # ---- (A) adaptive consistency filter ----
     if enable_A:
         events = adaptive_consistency_filter(
             events,
@@ -538,6 +473,129 @@ def filter_note_events_ABD(
         )
 
     return events
+
+
+# ---------------------------------
+# FRAME-BASED chord extraction
+# ---------------------------------
+@dataclass
+class FrameChord:
+    t0: float
+    t1: float
+    midis: Tuple[int, ...]  # sorted unique
+
+
+@dataclass
+class ChordSegment:
+    t0: float
+    t1: float
+    midis: Tuple[int, ...]  # sorted unique
+
+
+def events_to_frame_chords(
+    note_events: List[dict],
+    *,
+    audio_dur: float,
+    frame_hop: float = 0.05,
+    min_velocity: int = 0,
+    min_active_notes: int = 2,
+) -> List[FrameChord]:
+    """
+    Convert note events -> per-frame active MIDI set.
+    A note is active in frame [t0,t1] if onset < t1 and offset > t0.
+    """
+    if frame_hop <= 0:
+        raise ValueError("frame_hop must be > 0")
+
+    norm = []
+    for ev in note_events:
+        onset = float(ev["onset_time"])
+        offset = float(ev["offset_time"])
+        midi = int(ev["midi_note"])
+        vel = note_velocity(ev)
+        if vel < min_velocity:
+            continue
+        if offset <= onset:
+            continue
+        norm.append((onset, offset, midi))
+
+    frames: List[FrameChord] = []
+    t = 0.0
+    while t < audio_dur:
+        t0 = t
+        t1 = min(t + frame_hop, audio_dur)
+
+        active: Set[int] = set()
+        for onset, offset, midi in norm:
+            if onset < t1 and offset > t0:
+                active.add(midi)
+
+        if len(active) >= min_active_notes:
+            frames.append(FrameChord(t0=t0, t1=t1, midis=tuple(sorted(active))))
+
+        t += frame_hop
+
+    return frames
+
+
+def _jaccard(a: Set[int], b: Set[int]) -> float:
+    if not a and not b:
+        return 1.0
+    u = a | b
+    if not u:
+        return 0.0
+    return len(a & b) / len(u)
+
+
+def merge_frame_chords(
+    frames: List[FrameChord],
+    *,
+    min_jaccard: float = 0.85,
+    min_segment_dur: float = 0.10,
+) -> List[ChordSegment]:
+    """
+    Merge consecutive frames if chord sets are similar enough.
+    While merging, we keep the intersection to reduce flicker/ghost notes.
+    """
+    if not frames:
+        return []
+
+    segs: List[ChordSegment] = []
+
+    cur_t0 = frames[0].t0
+    cur_t1 = frames[0].t1
+    cur_set: Set[int] = set(frames[0].midis)
+
+    for fr in frames[1:]:
+        fr_set = set(fr.midis)
+        sim = _jaccard(cur_set, fr_set)
+
+        if sim >= min_jaccard:
+            cur_t1 = fr.t1
+            cur_set = (cur_set & fr_set) if (cur_set and fr_set) else fr_set
+        else:
+            if (cur_t1 - cur_t0) >= min_segment_dur and len(cur_set) > 0:
+                segs.append(ChordSegment(t0=cur_t0, t1=cur_t1, midis=tuple(sorted(cur_set))))
+            cur_t0 = fr.t0
+            cur_t1 = fr.t1
+            cur_set = fr_set
+
+    if (cur_t1 - cur_t0) >= min_segment_dur and len(cur_set) > 0:
+        segs.append(ChordSegment(t0=cur_t0, t1=cur_t1, midis=tuple(sorted(cur_set))))
+
+    return segs
+
+
+def _format_chord(midis: Tuple[int, ...]) -> str:
+    return "-".join(midi_to_name(m) for m in midis)
+
+
+def build_chords_txt(segments: List[ChordSegment], title: str = "Chord segments (frame-based)") -> str:
+    lines = [title, "", "idx\tstart(s)\tend(s)\tdur(s)\tnotes"]
+    for i, s in enumerate(segments):
+        dur = s.t1 - s.t0
+        lines.append(f"{i}\t{s.t0:.3f}\t{s.t1:.3f}\t{dur:.3f}\t{_format_chord(s.midis)}")
+    return "\n".join(lines) + "\n"
 
 
 # -----------------------------
@@ -585,6 +643,15 @@ def main():
         help="A: keep pitches whose total duration >= ratio * max_total_duration.",
     )
 
+    # --- FRAME-BASED options ---
+    parser.add_argument("--write-chords", action="store_true", help="Write *_chords.txt + chord_segments in JSON.")
+    parser.add_argument("--frame-hop", type=float, default=0.05, help="Frame hop in seconds (e.g. 0.05=50ms).")
+    parser.add_argument("--frame-min-vel", type=int, default=0, help="Ignore notes with velocity < this in frames.")
+    parser.add_argument("--frame-min-active", type=int, default=2, help="Drop frames with < this many active notes.")
+    parser.add_argument("--merge-min-jaccard", type=float, default=0.85, help="Merge frames if Jaccard >= this.")
+    parser.add_argument("--merge-min-dur", type=float, default=0.10, help="Drop chord segments shorter than this.")
+    parser.add_argument("--write-frame-chords", action="store_true", help="Store per-frame chords in JSON (bigger).")
+
     args = parser.parse_args()
 
     audio_path = Path(args.audio).expanduser().resolve()
@@ -599,6 +666,7 @@ def main():
     out_mid = outdir / f"{stem}.mid"
     out_txt = outdir / f"{stem}_notes.txt"
     out_json = outdir / f"{stem}_result.json"
+    out_chords = outdir / f"{stem}_chords.txt"
 
     # Load audio
     audio, _ = librosa.load(str(audio_path), sr=sample_rate, mono=True)
@@ -615,14 +683,13 @@ def main():
     note_events_raw = result.get("est_note_events", [])
     pedal_events = result.get("est_pedal_events", [])
 
-    # IMPORTANT FIX: clamp raw events to audio duration
+    # Clamp raw events to audio duration
     note_events_raw = clamp_events_to_audio(note_events_raw, audio_dur=audio_dur)
 
-    # Optional: print raw notes
     if args.print_raw:
         print(build_notes_txt(note_events_raw, title="RAW notes (clamped to audio duration)"))
 
-    # Apply ABD filters (any combination)
+    # Apply ABD filters
     note_events_filtered = filter_note_events_ABD(
         note_events_raw,
         enable_A=bool(args.enable_A),
@@ -636,16 +703,36 @@ def main():
         min_total_dur_ratio_of_max=float(args.min_total_dur_ratio_of_max),
     )
 
-    # Print filtered notes
     print(build_notes_txt(note_events_filtered, title="Filtered notes"))
 
-    # Pedal events
     if pedal_events:
         print("Pedal events (est_pedal_events):")
         for p in pedal_events:
             onset = float(p["onset_time"])
-            offset = min(float(p["offset_time"]), audio_dur)  # clamp for display
+            offset = min(float(p["offset_time"]), audio_dur)
             print(f"  onset={onset:.3f}s  offset={offset:.3f}s")
+
+    # -------- Frame-based chord extraction (optional) --------
+    frame_chords = []
+    chord_segments = []
+    if args.write_chords:
+        frame_chords = events_to_frame_chords(
+            note_events_filtered,
+            audio_dur=audio_dur,
+            frame_hop=float(args.frame_hop),
+            min_velocity=int(args.frame_min_vel),
+            min_active_notes=int(args.frame_min_active),
+        )
+        chord_segments = merge_frame_chords(
+            frame_chords,
+            min_jaccard=float(args.merge_min_jaccard),
+            min_segment_dur=float(args.merge_min_dur),
+        )
+
+        chords_txt = build_chords_txt(chord_segments)
+        print(chords_txt)
+        out_chords.write_text(chords_txt, encoding="utf-8")
+        print(f"Saved CHORDS TXT: {out_chords}")
 
     # Save TXT
     out_txt.write_text(build_notes_txt(note_events_filtered, title="Filtered notes"), encoding="utf-8")
@@ -671,6 +758,22 @@ def main():
                 "min_occurrences": args.min_occurrences,
                 "min_total_dur_ratio_of_max": args.min_total_dur_ratio_of_max,
             },
+            "frame_based": {
+                "enabled": bool(args.write_chords),
+                "frame_hop": args.frame_hop,
+                "frame_min_vel": args.frame_min_vel,
+                "frame_min_active": args.frame_min_active,
+                "merge_min_jaccard": args.merge_min_jaccard,
+                "merge_min_dur": args.merge_min_dur,
+            },
+            "frame_chords": [
+                {"t0": fc.t0, "t1": fc.t1, "midis": list(fc.midis), "notes": [midi_to_name(m) for m in fc.midis]}
+                for fc in frame_chords
+            ] if (args.write_chords and args.write_frame_chords) else None,
+            "chord_segments": [
+                {"t0": cs.t0, "t1": cs.t1, "midis": list(cs.midis), "notes": [midi_to_name(m) for m in cs.midis]}
+                for cs in chord_segments
+            ] if args.write_chords else None,
         }
 
     with open(out_json, "w", encoding="utf-8") as f:
