@@ -1,107 +1,169 @@
-# 🎹 Piano Transcription (Docker)
+# 🎹 Piano Audio Transcription (Python Only)
 
-This tool transcribes piano audio into:
-- **MIDI**
+This tool transcribes **piano audio recordings** into:
+- **MIDI** (`.mid`)
 - **TXT** (human-readable detected notes)
-- **JSON** (structured note events)
+- **JSON** (machine-readable note events)
 
-Everything runs inside **Docker** — no local Python setup needed.
+It uses a pretrained piano transcription model and runs **locally with Python** (no Docker required).
 
 ---
 
 ## 1️⃣ Requirements
-- **Docker Desktop** (Mac / Windows / Linux)
-  - https://www.docker.com/products/docker-desktop/
+
+- **macOS / Linux / Windows**
+- **Python 3.10 or newer**
+- Internet connection (first run downloads the model ~165 MB)
+
+Check Python version:
+```bash
+python3 --version
+```
 
 ---
 
-## 2️⃣ Project Structure
-```
-.
-├── Dockerfile
-├── docker-compose.yml
-├── txt-format.py
-├── requirements.txt
-└── data/
-    └── test.ogg
-```
-
-- Put your **audio files** into the `data/` folder
-- All **outputs** will also appear in `data/`
-
----
-
-## 3️⃣ Build the Docker image (first time only)
-From the project root:
+## 2️⃣ (Recommended) Create a virtual environment
 
 ```bash
-docker compose build
+python3 -m venv .venv
+source .venv/bin/activate
 ```
-
-This will:
-- install system dependencies (ffmpeg, soundfile, etc.)
-- install Python packages
-- download the piano transcription model (once)
 
 ---
 
-## 4️⃣ Run transcription
+## 3️⃣ System dependency (important for audio decoding)
+
+### macOS
+Install `ffmpeg` (required for `.m4a`, `.mp3`, `.ogg`):
+
+```bash
+brew install ffmpeg
+```
+
+### Linux (Ubuntu/Debian)
+```bash
+sudo apt update
+sudo apt install ffmpeg
+```
+
+---
+
+## 4️⃣ Install Python libraries
+
+Upgrade pip and install all required libraries:
+
+```bash
+pip install --upgrade pip
+pip install torch piano-transcription-inference librosa soundfile audioread numpy
+```
+
+### What these libraries do (short)
+| Library | Purpose |
+|------|-------|
+| torch | Neural network runtime |
+| piano-transcription-inference | Piano transcription model |
+| librosa | Audio loading & resampling |
+| soundfile | Audio decoding |
+| audioread | Fallback decoder |
+| numpy | Numeric arrays |
+
+---
+
+## 5️⃣ First run (model download)
+
+On the **first run**, the model file (~165 MB) is downloaded automatically.
+This happens only once and is reused afterwards.
+
+---
+
+## 6️⃣ Run the script
 
 ### Basic usage
+Outputs are written **next to the audio file**.
+
 ```bash
-docker compose run --rm piano --audio /data/test.ogg
+python txt-format.py --audio "/path/to/audio.m4a"
 ```
+
+---
 
 ### Specify output folder
+
 ```bash
-docker compose run --rm piano \
-  --audio /data/test.ogg \
-  --outdir /data/output
+python txt-format.py \
+  --audio "/Users/alimoutabi/Desktop/notes/A.m4a" \
+  --outdir "/Users/alimoutabi/Desktop/notes/output"
 ```
 
-### Optional flags
+---
+
+### Optional arguments
+
 ```bash
---no-midi        # do not keep MIDI file
---full-json      # export full model output (advanced)
---device cpu     # default (cuda possible if GPU is supported)
+--device cpu        # default (use cuda only if supported)
+--stem my_take      # custom output filename
+--no-midi           # do not keep MIDI file
+--full-json         # export full model output (advanced)
 ```
 
 Example:
 ```bash
-docker compose run --rm piano \
-  --audio /data/test.ogg \
-  --outdir /data/output \
+python txt-format.py \
+  --audio "/Users/alimoutabi/Desktop/notes/A.m4a" \
+  --outdir "/Users/alimoutabi/Desktop/notes/output" \
+  --stem practice_01 \
   --no-midi
 ```
 
 ---
 
-## 5️⃣ Output files
-For `test.ogg`, you will get:
+## 7️⃣ Output files
+
+For input `A.m4a`, you get:
 
 ```
-data/
-├── test.mid
-├── test_notes.txt
-└── test_result.json
+A.mid
+A_notes.txt
+A_result.json
 ```
+
+TXT columns:
+- idx: note index
+- midi: MIDI note number
+- name: note name (e.g. C4)
+- onset / offset: seconds
+- dur: duration
+- velocity: estimated velocity
 
 ---
 
-## 6️⃣ Notes
-- First run may take longer (model download ~165MB)
-- Best results with clean piano recordings
-- Acoustic piano via microphone is supported
+## 8️⃣ Troubleshooting
+
+- **"PySoundFile failed" warning**  
+  Normal — `audioread + ffmpeg` is used instead.
+
+- **CUDA not available**  
+  Use:
+  ```bash
+  --device cpu
+  ```
+
+- **Model download fails**  
+  Check internet and write permissions in your home folder.
 
 ---
 
-## 7️⃣ Troubleshooting
-If something goes wrong:
+## ✔️ Summary (TL;DR)
+
 ```bash
-docker compose build --no-cache
+brew install ffmpeg
+python3 -m venv .venv
+source .venv/bin/activate
+pip install torch piano-transcription-inference librosa soundfile audioread numpy
+python txt-format.py --audio "/path/to/file.m4a" --outdir "/path/to/output"
 ```
 
 ---
 
-## ✔️ That’s it
-No Python install, no virtualenv, no system dependencies — just Docker.
+Enjoy 🎹  
+This tool is designed for **practice analysis**, not grading.
